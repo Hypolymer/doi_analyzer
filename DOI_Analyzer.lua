@@ -1,4 +1,4 @@
--- DOI Analyzer, version 1.5 (May 9, 2025)
+-- DOI Analyzer, version 1.10 (November 14, 2025)
 -- This Server Addon was developed by Angela Persico (apersico@albany.edu; University at Albany), Bill Jones (jonesw@geneseo.edu; SUNY Geneseo), and Tim Jackson (Timothy.Jackson@suny.edu; SUNY Libraries Shared Services)
 -- The purpose of this Addon is to clean up DOI fields and fetch a DOI from CrossRef if the DOI is missing
 -- This Addon will attempt to extract an ISBN from a DOI if the DOI URL contains '978'
@@ -29,6 +29,8 @@ end
 
 function TimerElapsed(eventArgs)
 	LogDebug("DOI Analyzer > Processing DOI ANALYZER Items");
+	local currentTN_int = GetFieldValue("Transaction", "TransactionNumber");
+	local transactionNumber = luanet.import_type("System.Convert").ToDouble(currentTN_int);
 	if not isCurrentlyProcessing then
 		isCurrentlyProcessing = true;
 
@@ -37,6 +39,7 @@ function TimerElapsed(eventArgs)
 		if not success then
 			LogDebug("DOI Analyzer > There was a fatal error processing the items.")
 			LogDebug("DOI Analyzer > Error: " .. err);
+			ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > There was a fatal error processing the items. Error: " .. err});
 		end
 		isCurrentlyProcessing = false;
 	else
@@ -66,9 +69,20 @@ function rerun_checker()
 	connection:Disconnect();
 	if rerun_status == transactionNumber then
 		LogDebug('DOI Analyzer > rerun_checker > The DOI ANALYZER already ran on transaction ' .. transactionNumber .. '. Now Stopping Addon.');
-		if Settings.ItemFailHoldRequestQueue ~= "" then
-			ExecuteCommand("Route",{transactionNumber, Settings.FailureQueue});
-			ExecuteCommand("AddNote",{transactionNumber, "ERROR: The DOI ANALYZER already ran on this transaction and it has been sitting in the " .. Settings.QueueToMonitor .. " processing queue. The TN is being routed to " .. Settings.FailureQueue .. ". Please remove the note that says 'The DOI ANALYZER Addon ran on this transaction.' and re-route the TN to the " .. Settings.QueueToMonitor .. " queue in order to reprocess the TN."});
+		if Settings.FailureQueue ~= "" then
+			local currentStatus = statusChecker()	
+			if currentStatus ~= Settings.FailureQueue then
+				ExecuteCommand("Route",{transactionNumber, Settings.FailureQueue});
+			end		
+			connection.QueryString = "SELECT TransactionNumber FROM Notes WHERE TransactionNumber = '" .. transactionNumber .. "' AND NOTE LIKE 'ERROR: The DOI ANALYZER already ran on this transaction%'";
+			connection:Connect();
+			local error_note_checker = connection:ExecuteScalar();
+			connection:Disconnect();
+			if error_note_checker == transactionNumber then
+				LogDebug("DOI Analyzer > rerun_checker > Rerun note already present. Skipping instructional note writeout.");
+			else
+				ExecuteCommand("AddNote",{transactionNumber, "ERROR: The DOI ANALYZER already ran on this transaction and it has been sitting in the " .. Settings.QueueToMonitor .. " processing queue. The TN is being routed to " .. Settings.FailureQueue .. ". Please remove the note that says 'The DOI ANALYZER Addon ran on this transaction.' and re-route the TN to the " .. Settings.QueueToMonitor .. " queue in order to reprocess the TN."});
+			end
 		end	
 		has_it_run = true;	
 	end
@@ -99,6 +113,18 @@ function HandleContextProcessing()
 	end
 end
 
+function statusChecker()
+	local currentTN_int = GetFieldValue("Transaction", "TransactionNumber");
+	local transactionNumber = luanet.import_type("System.Convert").ToDouble(currentTN_int);
+	
+	local connection = CreateManagedDatabaseConnection();
+	connection.QueryString = "SELECT TransactionStatus FROM Transactions WHERE TransactionNumber = '" .. transactionNumber .. "'";
+	connection:Connect();
+	local rerun_status = connection:ExecuteScalar();
+	connection:Disconnect();
+	return rerun_status
+end
+
 
 local function contains_isbn_prefix(url)
 LogDebug("DOI Analyzer > contains_isbn_prefix > url being processed: " .. url);
@@ -111,9 +137,28 @@ else
 end
 end
 
+
+function is_integer(value)
+    local num = tonumber(value)
+    return num ~= nil and math.floor(num) == num
+end
+
+
+
+function urlEncode(str)
+    if not str then return "" end
+		str = string.gsub (str, "\n", "\r\n");		
+		str = string.gsub (str, "([^%w ])",
+			function (c) return string.format ("%%%02X", string.byte(c)) end);		
+		str = string.gsub (str, " ", "+");
+    return str
+end
+
+
 function Get_CrossRef_DOI()
 LogDebug("DOI Analyzer > Initializing function Get_CrossRef_DOI");
 local url = "";
+local responseString = "";
 local currentTN_int = GetFieldValue("Transaction", "TransactionNumber");
 local transactionNumber = luanet.import_type("System.Convert").ToDouble(currentTN_int);
 local ISSN = GetFieldValue("Transaction", "ISSN");
@@ -136,35 +181,55 @@ local PhotoJournalInclusivePages = GetFieldValue("Transaction", "PhotoJournalInc
 local PhotoJournalInclusivePages_edit = "";
 if PhotoJournalInclusivePages ~= "" then
 	PhotoJournalInclusivePages_edit = PhotoJournalInclusivePages:match("(%d+)");
-	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Adjusted Author value: " .. PhotoJournalInclusivePages .. " to: " ..  PhotoJournalInclusivePages_edit .. " for CrossRef Lookup");	
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Adjusted Inclusive Pages value: " .. PhotoJournalInclusivePages .. " to: " ..  PhotoJournalInclusivePages_edit .. " for CrossRef Lookup");	
 end
-
+local message = "DOI Analyzer > Get_CrossRef_DOI > ";
+local attempt_message = "";
 	-- Example usage
 	--local reference = "https://doi.crossref.org/openurl?redirect=false&pid=jonesw@geneseo.edu&aulast=Kostos&title=Using%20Math%20Journals%20to%20Enhance%20Second%20Graders%20Communication%20of%20Mathematical%20Thinking&volume=38&issn=1082-3301&issue=3&date=2010";
 
-	if Settings.EmailAddress ~= "" then
-		
+	if Settings.EmailAddress ~= "" then		
 		url = "https://doi.crossref.org/openurl?redirect=false&pid=" .. Settings.EmailAddress;
 		if PhotoArticleAuthor_edit ~= "" then
 			url = url .. "&aulast=" .. PhotoArticleAuthor_edit;
 		end
 		if PhotoJournalTitle ~= "" then
-			url = url .. "&title=" .. PhotoJournalTitle;
+			url = url .. "&title=" .. urlEncode(PhotoJournalTitle);
 		end
 		if PhotoJournalVolume ~= "" then
-			url = url .. "&volume=" .. PhotoJournalVolume;
+			if is_integer(PhotoJournalVolume) then
+				url = url .. "&volume=" .. PhotoJournalVolume;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalVolume value is not an integer.  Skipping PhotoJournalVolume Field.");
+				message = message .. "The PhotoJournalVolume value is not an integer. Skipping PhotoJournalVolume Field. ";
+			end			
 		end
 		if ISSN ~= "" then
 			url = url .. "&issn=" .. ISSN;
 		end
 		if PhotoJournalIssue ~= "" then
-			url = url .. "&issue=" .. PhotoJournalIssue;
+			if is_integer(PhotoJournalIssue) then
+				url = url .. "&issue=" .. PhotoJournalIssue;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalIssue value is not an integer.  Skipping PhotoJournalIssue Field.");
+				message = message .. "The PhotoJournalIssue value is not an integer. Skipping PhotoJournalIssue Field. ";
+			end			
 		end
 		if PhotoJournalYear ~= "" then
-			url = url .. "&date=" .. PhotoJournalYear;
+			if is_integer(PhotoJournalYear) then
+				url = url .. "&date=" .. PhotoJournalYear;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalYear value is not an integer.  Skipping PhotoJournalYear Field.");
+				message = message .. "The PhotoJournalYear value is not an integer. Skipping PhotoJournalYear Field. ";
+			end
 		end
 		if PhotoJournalInclusivePages_edit ~= "" then
-			url = url .. "&spage=" .. PhotoJournalInclusivePages_edit
+			if is_integer(PhotoJournalInclusivePages_edit) then
+				url = url .. "&spage=" .. PhotoJournalInclusivePages_edit;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalInclusivePages value is not an integer.  Skipping PhotoJournalInclusivePages Field.");
+				message = message .. "The PhotoJournalInclusivePages value is not an integer.  Skipping PhotoJournalInclusivePages Field.";
+			end
 		end
 
 		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Full URL assembled for CrossRef API Lookup: " .. url);
@@ -190,6 +255,188 @@ end
 		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Extracted DOI from CrossRef: " .. doi);
         break
     end
+	
+	
+	-- Second CrossRef Call Attempt
+	
+	if not doi then
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > The first CrossRef call did not return a DOI.  Attempting to remove Author value then resend call.");
+		attempt_message = "DOI Analyzer > Get_CrossRef_DOI > After 1 failed attempt, a second CrossRef call was made by dropping Author field value.";
+		if Settings.EmailAddress ~= "" then
+		url = "https://doi.crossref.org/openurl?redirect=false&pid=" .. Settings.EmailAddress;
+		if PhotoJournalTitle ~= "" then
+			url = url .. "&title=" .. urlEncode(PhotoJournalTitle);
+		end
+		if PhotoJournalVolume ~= "" then
+			if is_integer(PhotoJournalVolume) then
+				url = url .. "&volume=" .. PhotoJournalVolume;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalVolume value is not an integer.  Skipping PhotoJournalVolume Field.");
+			end			
+		end
+		if ISSN ~= "" then
+			url = url .. "&issn=" .. ISSN;
+		end
+		if PhotoJournalIssue ~= "" then
+			if is_integer(PhotoJournalIssue) then
+				url = url .. "&issue=" .. PhotoJournalIssue;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalIssue value is not an integer.  Skipping PhotoJournalIssue Field.");
+			end			
+		end
+		if PhotoJournalYear ~= "" then
+			if is_integer(PhotoJournalYear) then
+				url = url .. "&date=" .. PhotoJournalYear;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalYear value is not an integer.  Skipping PhotoJournalYear Field.");
+			end
+		end
+		if PhotoJournalInclusivePages_edit ~= "" then
+			if is_integer(PhotoJournalInclusivePages_edit) then
+				url = url .. "&spage=" .. PhotoJournalInclusivePages_edit;
+			else
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalInclusivePages value is not an integer.  Skipping PhotoJournalInclusivePages Field.");
+			end
+		end
+
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Full URL assembled for CrossRef API Lookup: " .. url);
+
+	-- No Email Address found in Config
+	else 
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > You do not have a configuration value set for Settings.EmailAddress. Please set an email address to be sent with your CrossRef API calls.");
+	end
+	
+	url = string.gsub(url, " ", "+");
+
+    local webClient = Types["WebClient"]()
+    webClient.Headers:Clear()
+    webClient.Headers:Add("Content-Type", "application/xml; charset=UTF-8")
+    webClient.Headers:Add("accept", "application/xml; charset=UTF-8")
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > URL being sent to CrossRef: " .. url);
+    local responseBytes = webClient:DownloadString(url)
+
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Response from CrossRef: " .. responseBytes);
+    local doi;
+    for tagContent in responseBytes:gmatch('">(.-)</doi>') do
+        doi = tagContent:gsub('(.-)>', '');
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Extracted DOI from CrossRef: " .. doi);
+        break
+    end
+	end
+	
+	-- Third CrossRef Call Attempt
+	
+	if not doi then
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > The second CrossRef call did not return a DOI.  Attempting to remove Author value and Issue value then resend.");
+	attempt_message = "DOI Analyzer > Get_CrossRef_DOI > After 1 failed attempt, a second CrossRef call was made by dropping Author field value, and a third call was made by dropping the Author field and Issue field.";
+	if Settings.EmailAddress ~= "" then
+	url = "https://doi.crossref.org/openurl?redirect=false&pid=" .. Settings.EmailAddress;
+	if PhotoJournalTitle ~= "" then
+		url = url .. "&title=" .. urlEncode(PhotoJournalTitle);
+	end
+	if PhotoJournalVolume ~= "" then
+		if is_integer(PhotoJournalVolume) then
+			url = url .. "&volume=" .. PhotoJournalVolume;
+		else
+			LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalVolume value is not an integer.  Skipping PhotoJournalVolume Field.");
+		end			
+	end
+	if ISSN ~= "" then
+		url = url .. "&issn=" .. ISSN;
+	end
+	if PhotoJournalYear ~= "" then
+		if is_integer(PhotoJournalYear) then
+			url = url .. "&date=" .. PhotoJournalYear;
+		else
+			LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalYear value is not an integer.  Skipping PhotoJournalYear Field.");
+		end
+	end
+	if PhotoJournalInclusivePages_edit ~= "" then
+		if is_integer(PhotoJournalInclusivePages_edit) then
+			url = url .. "&spage=" .. PhotoJournalInclusivePages_edit;
+		else
+			LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalInclusivePages value is not an integer.  Skipping PhotoJournalInclusivePages Field.");
+		end
+	end
+
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Full URL assembled for CrossRef API Lookup: " .. url);
+
+	-- No Email Address found in Config
+	else 
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > You do not have a configuration value set for Settings.EmailAddress. Please set an email address to be sent with your CrossRef API calls.");
+	end
+
+	url = string.gsub(url, " ", "+");
+
+	local webClient = Types["WebClient"]()
+	webClient.Headers:Clear()
+	webClient.Headers:Add("Content-Type", "application/xml; charset=UTF-8")
+	webClient.Headers:Add("accept", "application/xml; charset=UTF-8")
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > URL being sent to CrossRef: " .. url);
+	local responseBytes = webClient:DownloadString(url)
+
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Response from CrossRef: " .. responseBytes);
+	local doi;
+	for tagContent in responseBytes:gmatch('">(.-)</doi>') do
+		doi = tagContent:gsub('(.-)>', '');
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Extracted DOI from CrossRef: " .. doi);
+		break
+	end
+	end
+	
+	-- Fourth CrossRef Call Attempt
+	
+	if not doi then
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Third CrossRef call did not return a DOI.  Attempting to remove Author value, Issue value, and Volume value then resend.");
+	attempt_message = "DOI Analyzer > Get_CrossRef_DOI > After 1 failed attempt, a second CrossRef call was made by dropping Author field value, a third call was made by dropping the Author field and Issue field, and a fourth call was made by dropping the Author field, Issue field, and Volume field.";
+	if Settings.EmailAddress ~= "" then
+	url = "https://doi.crossref.org/openurl?redirect=false&pid=" .. Settings.EmailAddress;
+	if PhotoJournalTitle ~= "" then
+		url = url .. "&title=" .. urlEncode(PhotoJournalTitle);
+	end
+	if ISSN ~= "" then
+		url = url .. "&issn=" .. ISSN;
+	end
+	if PhotoJournalYear ~= "" then
+		if is_integer(PhotoJournalYear) then
+			url = url .. "&date=" .. PhotoJournalYear;
+		else
+			LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalYear value is not an integer.  Skipping PhotoJournalYear Field.");
+		end
+	end
+	if PhotoJournalInclusivePages_edit ~= "" then
+		if is_integer(PhotoJournalInclusivePages_edit) then
+			url = url .. "&spage=" .. PhotoJournalInclusivePages_edit;
+		else
+			LogDebug("DOI Analyzer > Get_CrossRef_DOI > The PhotoJournalInclusivePages value is not an integer.  Skipping PhotoJournalInclusivePages Field.");
+		end
+	end
+
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Full URL assembled for CrossRef API Lookup: " .. url);
+
+	-- No Email Address found in Config
+	else 
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > You do not have a configuration value set for Settings.EmailAddress. Please set an email address to be sent with your CrossRef API calls.");
+	end
+
+	url = string.gsub(url, " ", "+");
+
+	local webClient = Types["WebClient"]()
+	webClient.Headers:Clear()
+	webClient.Headers:Add("Content-Type", "application/xml; charset=UTF-8")
+	webClient.Headers:Add("accept", "application/xml; charset=UTF-8")
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > URL being sent to CrossRef: " .. url);
+	local responseBytes = webClient:DownloadString(url)
+
+	LogDebug("DOI Analyzer > Get_CrossRef_DOI > Response from CrossRef: " .. responseBytes);
+	local doi;
+	for tagContent in responseBytes:gmatch('">(.-)</doi>') do
+		doi = tagContent:gsub('(.-)>', '');
+		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Extracted DOI from CrossRef: " .. doi);
+		break
+	end
+	end
+	
 
 	if doi then
 		LogDebug("DOI Analyzer > Get_CrossRef_DOI > DOI: " .. tostring(doi));
@@ -199,8 +446,14 @@ end
 
 			if contains_isbn_prefix(doi) then
 
-				local isbn_pattern = "/(978%d+)";
-				local pulled_isbn = doi:match(isbn_pattern);
+				local isbn_start = doi:match("978[%d%-]+");
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI  > ISBN raw value: " .. isbn_start);			
+				
+				local digits_only = isbn_start:gsub("%D", "");
+				LogDebug("DOI Analyzer > Get_CrossRef_DOI > Stripped ISBN: " .. digits_only);
+    
+				-- Capture the first 13 digits			
+				local pulled_isbn = digits_only:match("^(978%d%d%d%d%d%d%d%d%d%d)");
 
 					if pulled_isbn then
 							ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Extracted ISBN from DOI: " .. tostring(pulled_isbn)});
@@ -208,7 +461,7 @@ end
 							SetFieldValue("Transaction", "ISSN", pulled_isbn);
 							SaveDataSource("Transaction");
 					else
-						LogDebug("DOI Analyzer > No ISBN found in the URL.");
+						LogDebug("DOI Analyzer > Get_CrossRef_DOI > No ISBN found in the URL.");
 					end
 			else
 				LogDebug("DOI Analyzer > Get_CrossRef_DOI > contains_isbn_prefix > The URL does not contain '978'.");
@@ -218,19 +471,24 @@ end
 				webClient.Headers:Clear();
 				webClient.Headers:Add("Content-Type", "application/xml; charset=UTF-8");
 				webClient.Headers:Add("Accept", "application/xml; charset=UTF-8");
-				local responseString = webClient:DownloadString(isbn_lookup_url);
+				responseString = webClient:DownloadString(isbn_lookup_url);
 						
 				if string.find(responseString, 'doi_records') ~= nil then
 				--LogDebug(responseString);
-				local found_isbn = responseString:match('<isbn media_type="print">(.-)</isbn>'):gsub('(.-)>', ''); -- look for found_isbn
-					if found_isbn ~= "" then
-						LogDebug("DOI Analyzer > Get_CrossRef_DOI > The item is showing an ISBN in the Crossref Metadata of [" .. found_isbn .. "]");
-						ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Extracted ISBN from CrossRef Metadata using the DOI: [" .. found_isbn .. "]"});
-						SetFieldValue("Transaction", "ISSN", found_isbn);
-					    SaveDataSource("Transaction");
-					end		
-					if found_isbn == "" then
-						LogDebug("DOI Analyzer > Get_CrossRef_DOI > No ISBN found in CrossRef Metadata using the DOI. Continue on.");
+				local has_isbn_tag = responseString:match('<isbn media_type="print">(.-)</isbn>') ~= nil;
+					if has_isbn_tag then
+					local found_isbn = responseString:match('<isbn media_type="print">(.-)</isbn>'):gsub('(.-)>', ''); -- look for found_isbn
+						if found_isbn ~= "" then
+							LogDebug("DOI Analyzer > Get_CrossRef_DOI > The item is showing an ISBN in the Crossref Metadata of [" .. found_isbn .. "]");
+							ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Extracted ISBN from CrossRef Metadata using the DOI: [" .. found_isbn .. "]"});
+							SetFieldValue("Transaction", "ISSN", found_isbn);
+							SaveDataSource("Transaction");
+						end		
+						if found_isbn == "" then
+							LogDebug("DOI Analyzer > Get_CrossRef_DOI > No ISBN found in CrossRef Metadata using the DOI. Continue on.");
+						end
+					else
+						LogDebug("DOI Analyzer > Get_CrossRef_DOI > Unable to find ISBN tag in CrossRef Metadata using the DOI. Continue on.");
 					end
 				end	
 			end
@@ -239,7 +497,14 @@ end
 	else
 		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Unable to extract DOI from CrossRef.");
 		LogDebug("DOI Analyzer > Get_CrossRef_DOI > Error: " .. tostring(err));
-		ExecuteCommand("Route",{transactionNumber, Settings.FailureQueue});
+		ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Get_CrossRef_DOI > Unable to extract DOI from CrossRef. The CrossRef lookup URL used was: " .. url});
+		ExecuteCommand("AddNote",{transactionNumber, message});
+		ExecuteCommand("AddNote",{transactionNumber, attempt_message});
+		ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Get_CrossRef_DOI > Here is the XML returned from CrossRef: " .. responseBytes});
+		local currentStatus = statusChecker()	
+		if currentStatus ~= Settings.FailureQueue then
+			ExecuteCommand("Route",{transactionNumber, Settings.FailureQueue});
+		end		
 		
 	end
 end
@@ -254,10 +519,17 @@ function FixDOI()
             SaveDataSource("Transaction");
 			
 			if contains_isbn_prefix(doi) then
+			
+				local isbn_start = doi:match("978[%d%-]+");
+				LogDebug("DOI Analyzer > FixDOI > ISBN raw value: " .. isbn_start);			
+				
+				local digits_only = isbn_start:gsub("%D", "");
+				LogDebug("DOI Analyzer > FixDOI > Stripped ISBN: " .. digits_only);
+    
+				-- Capture the first 13 digits			
+				local pulled_isbn = digits_only:match("^(978%d%d%d%d%d%d%d%d%d%d)");
 
-				local isbn_pattern = "/(978%d+)";
-				local pulled_isbn = doi:match(isbn_pattern);
-
+				
 					if pulled_isbn then
 							ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > Extracted ISBN from DOI: " .. tostring(pulled_isbn)});
 							LogDebug("DOI Analyzer > FixDOI > Extracted ISBN from DOI: " .. tostring(pulled_isbn));
@@ -299,8 +571,12 @@ function FixDOI()
 			end
         return strippedDOI;
     else
-        LogDebugFormat("DOI Analyzer > FixDOI > Failed to strip DOI from: " .. doi);	
-		ExecuteCommand("Route",{transactionNumber, Settings.FailureQueueQueue});			
+        LogDebugFormat("DOI Analyzer > FixDOI > Failed to strip DOI from: " .. doi);
+	    ExecuteCommand("AddNote",{transactionNumber, "DOI Analyzer > FixDOI > Failed to strip DOI from: " .. doi});
+		local currentStatus = statusChecker()	
+		if currentStatus ~= Settings.FailureQueue then
+			ExecuteCommand("Route",{transactionNumber, Settings.FailureQueue});
+		end		
         return nil;
     end
 end
