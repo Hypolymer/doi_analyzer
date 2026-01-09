@@ -1,12 +1,12 @@
 <Configuration>
   <Name>DOI Analyzer</Name>
   <Author>Angela Persico, University at Albany; Bill Jones, SUNY Geneseo; and Tim Jackson, SUNY SLSS</Author>
-  <Version>1.5</Version>
+  <Version>1.10</Version>
   <Active>true</Active>
   <Type>Server</Type>
   <Description>This Server addon adds and cleans DOI URLs and attempts to add an ISBN based on DOI lookup.  Transactions are routed based on success or failure.</Description>
   <Settings>
-    <Setting name="QueueToMonitor" value="DOI_Analyzer" type="string">
+    <Setting name="QueueToMonitor" value="DOI Analyzer" type="string">
       <Description>The queue the Addon will monitor to process new Borrowing requests.</Description>
     </Setting>
     <Setting name="SuccessQueue" value="Awaiting Pre-Copyright Pipeline" type="string">
@@ -15,7 +15,7 @@
     <Setting name="FailureQueue" value="DOI Analyzer Failed" type="string">
       <Description>The queue a Transaction will be moved to if the DOI processing fails.</Description>
     </Setting>
-    <Setting name="EmailAddress" value="" type="string">
+    <Setting name="EmailAddress" value="jonesw@geneseo.edu" type="string">
       <Description>The email address you will be sending with your CrossRef API lookups.  You do not need to have a CrossRef account.</Description>
     </Setting>	
   </Settings>
